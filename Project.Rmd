@@ -1,0 +1,134 @@
+---
+title: "Quantifiable Self Barbell-Lift Classifier"
+author: "Xavier Musy"
+date: "October 20, 2014"
+output: html_document
+---
+
+## Executive Summary
+
+Quantifiable self data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants is used to predict how well weight lifting activities are performed.  Specifically, a supervised machine learning model is generated to predict when barbell lifts are performed incorrectly in 5 different ways, from Qualitative Activity Recognition of Weight Lifting Exercises dataset [1].  A random forest classifier (wrapper approach) is used to generate a predictive model with strong accuracy and low out-of-sample error rate. 
+
+## Exploratory data Analysis
+
+```{r echo=FALSE, message=FALSE}
+library(caret)
+library(corrplot)
+
+train = read.csv("pml-training.csv")  # read training data
+test = read.csv("pml-testing.csv")  # read test data
+```
+
+Basic data analysis reveals reasonable distribution per each classe out of the `r dim(train)[1]` training observations (as percentages): 
+```{r echo=FALSE}
+round(prop.table(summary(train$classe)) * 100, digits = 2)
+```
+However, there's high-dimensionality of features, with `r dim(train)[2] -1` possible predictors.  
+
+
+```{r echo=FALSE}
+NAVarsCount <- apply(train,2,function(x) {sum(is.na(x))}) # get NA columnssu
+missingDataThreshHold <- 19200
+```
+We identify `r length(which(NAVarsCount > missingDataThreshHold))` features with missing data, and observe from variable names that these are avg, std, and other aggregate information not useful as predictors:
+```{r echo=FALSE}
+unique(gsub( "_.*$", "", names(train)[which(NAVarsCount > missingDataThreshHold)] ))
+```
+
+```{r echo=FALSE}
+nearZeroVars <- nearZeroVar(train) # get near zero columns
+```
+We also identify `r length(nearZeroVars)` zero-variance features.
+
+Finally, we identify a few features with that are not good predictors as they are user names or time-related features:
+```{r echo=FALSE}
+badPredIndex = c(1:7)
+names(train)[badPredIndex]
+```
+
+## Data Cleansing and Pre-processing
+
+We perform data cleansing and pre-processing to filter out the aforementioned undesired features.  We remove the identified features which have a high number of NAs.  We also remove identified features with user names and time-related features, as we don't want these for our predictors. Lastly, we get rid of zero-variance predictors identified.
+```{r echo=FALSE}
+removeIndex <- c(badPredIndex, which(NAVarsCount > missingDataThreshHold), nearZeroVars) # unwanted
+train <- train[,-removeIndex]
+test <- test[,-removeIndex]
+```
+ 
+A total of `r length(unique(removeIndex))` features are removed, leaving `r length(names(train))` possible predictors.  
+
+We do observe a remaining number of highly-correlated features:  
+```{r echo=FALSE}
+corMat <- cor(train[,-length(names(train))],)
+highlyCorIndex <- findCorrelation(corMat, cutoff = 0.75)
+highCorMat <- cor(train[,highlyCorIndex],)
+corrplot(highCorMat, type="lower", order="hclust", tl.cex = 0.6, tl.col="black", tl.srt = 50)
+```
+
+While these `r length(highlyCorIndex)` highly-correlated features could be redundant, due to lack of interpretation of removing any of these featues, and which of the corrolated to keep, we opt to keep them all and let classifier training process feature selection and importance:  we choose a wrapper vs a filter approach here.
+
+We seed partitioning, and split our training data into a 60% traning and 40% cross-validation set, to later determine out-of-sample error rate.  
+```{r echo=FALSE}
+set.seed(as.integer("0xB33F"))
+trainIndex <- createDataPartition(y = train$classe, p=0.6,list=FALSE)
+trainSet <- train[trainIndex,]
+crossValidationSet <- train[-trainIndex,]
+```
+
+## Model Training and Tuning
+
+We choose to predict using a random forest classifier, to obtain high accuracy and accepting interpretation as less important given the remaining high number of features.  We use cross-validation method for resampling.  And we perform 5 folds with no perceived loss in accuracy.  
+```{r cache=TRUE, echo=FALSE, message=FALSE}
+modelFit <- train(classe ~.,data = trainSet, 
+                  method="rf", # user random forest
+                  trControl = trainControl(method = "cv", # use cross validation
+                                           number = 5, # use five folds 
+                                           allowParallel = TRUE)) # allow parellel execution 
+```
+The final model OOB error rate is `r round(modelFit$finalModel$err.rate[500] * 100, digits=2)`%, which is quite low.  
+
+## Variable Importance
+We explore variable importance, and do see reasonable use of predictors:   
+
+```{r echo=FALSE, message=FALSE, fig.height=7, fig.width=5}
+plot(varImp(modelFit), main = "Variable Importance", cex.lab=.2)
+```
+
+## Prediction and Results
+We predict on the cross-validation set to get projected out-of-sample error rate.  
+```{r echo=FALSE}
+predicted <- predict(modelFit, crossValidationSet)
+cm <- confusionMatrix(predicted, crossValidationSet$classe)
+accuracy <- cm$overall[1]
+confInt <- c(cm$overall[3], cm$overall[4])
+```
+
+Out-of-sample accuracy is `r round(accuracy * 100, digits=2)`%.  The 95% confidence interval for that accuracy is `r round(confInt[1] * 100, digits=2)`% to `r round(confInt[2] * 100, digits=2)`%.
+Out-of-sample error is `r round( (1 - accuracy) * 100, digits=2)`%.
+
+Sensitivity (as a percentage) is high accross all classes (albeit a slight drop in class D):
+```{r echo=FALSE}
+round(cm$byClass[,1] * 100, digits=2)
+```
+Specificity (as a percentage) is also high accross all classes:
+```{r echo=FALSE}
+round(cm$byClass[,2] * 100, digits=2)
+```
+
+We use our final model against test data, which correctly predicted all classes: 
+```{r echo=FALSE}
+answers <- predict(modelFit,newdata=test)
+print(answers)
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(answers)
+```
+
+
+*[1] Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013*
